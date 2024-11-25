@@ -29,32 +29,34 @@ else:
 start_time = time.time()
 
 # Generator information
-event_gen=pd.DataFrame({
+event_gen = pd.DataFrame({
     'BusNum' : [7098, 7099],
     'GenID' : [1, 1]
 })
 
-output_gen_info=output_gen_info_org.copy()
-output_gov_gasInfo=output_gov_gasInfo_org.copy()
+# NOTE copy not needed - it is slow 
+output_gen_info    = output_gen_info_org
+output_gov_gasInfo = output_gov_gasInfo_org
 
-output_gen_info['TSVmax']=0.87
-output_gov_gasInfo['TSLdref']=0.835
-output2=datagen.DataGenerate(gen_data, output_gen_info, output_gov_gasInfo, event_gen)
+output_gen_info['TSVmax']     = 0.87
+output_gov_gasInfo['TSLdref'] = 0.835
+gen_data_active, gov_gasInfo  = datagen.DataGenerate(
+    gen_data, 
+    output_gen_info, 
+    output_gov_gasInfo, 
+    event_gen
+)
 
-gen_data_active=output2[0]
-gov_gasInfo = output2[1]
-
-
-numGen=gen_data_active.shape[0]
-P_event=2558/sum(gen_data_active['GenMVABase'])
-Hsys=sum(gen_data_active['TSH']*100)/sum(gen_data_active['GenMVABase'])
+numGen  = gen_data_active.shape[0]
+P_event = 2558/sum(gen_data_active['GenMVABase'])
+Hsys    = sum(gen_data_active['TSH']*100)/sum(gen_data_active['GenMVABase'])
 
 ## Coefficient for Polynomial Fitting
 # Lambda matrix for integral of ramp polynomials
 
 # Initialize variables
 coeffi = 1 / (np.arange(1, order + 2))  # Coefficients for lambda matrix
-lamda = np.diagflat(1-coeffi)
+lamda  = np.diagflat(1-coeffi)
 
 # Proportional coefficient for governor output (based on machine size)
 alpha = gen_data_active['GenMVABase'] / sum(gen_data_active['GenMVABase'])
@@ -125,12 +127,9 @@ ramp_p = pd.concat([p_valve_total, zeros_column], axis=1)
 ramp_p_integ.columns = range(ramp_p_integ.shape[1])
 ramp_p.columns = range(ramp_p.shape[1]) 
 
-
-# Define variables accordingly
-# Initialize required arrays, variables, and constants here
-
-#unittest_gas = unittest_gas.to_numpy() # np.array(output_unittest['unitTestLoadlimit_ggov1'])
-#unittest = unittest.to_numpy() # np.array(output_unittest['unitTest'])
+# Violation Types
+LOAD_LIMIT_VIOLATION = 2
+VALVE_LIMIT_VIOLATION = 1
 
 # Precompute limit values for faster access
 lim_u = gen_data_active['valve_lim_u']
@@ -237,6 +236,7 @@ while True:
 
     # Load limit response at no limit governors
     # NOTE There is some redundant action here, can simplify ccode greatly by just using binary mask
+    # tolist is a very slow action
     nolimit_index_gas = (
         gen_data_active.index[is_ggov1 & mask_index_nolimit]
     ).tolist() 
@@ -355,7 +355,7 @@ while True:
         break
 
     '''Load Limit Violation'''
-    if status == 2:
+    if status == LOAD_LIMIT_VIOLATION:
 
 
         v_coefficient_limit = v_coeffifient_total.loc[index_limit_new_load,:].to_numpy()
@@ -533,7 +533,8 @@ while True:
             Pm_limit_new = Pm_limit_new1
 
     # Valve Limit Violation
-    elif status == 1:
+    elif status == VALVE_LIMIT_VIOLATION:
+
         v_coeffifient_limit = v_coeffifient_total.loc[index_limit_new_valve, :].to_numpy()
     
         Pm_limit_new = np.empty((time_fit_len, len(index_limit_new_valve)))
