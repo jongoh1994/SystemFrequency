@@ -13,37 +13,27 @@ from numba import jit
 
 np.set_printoptions(suppress=True)
 
-
-# Generator Data File Names
+''' FILE I/O '''
 fname_steam, fname_gas, fname_gen = 'data/IEEEG1_data.csv', 'data/GGOV1_data.csv', 'data/GEN_data.csv'
+fname_output = "data/OUTPUT"
 
-# Parameters
 order, t_sim = 6, 10
 
-# Get Matlab Output and Generator Information Dataframes
-output_gen_info_org, output_gov_gasInfo_org, gen_data = readgen.get_gen_params(fname_steam, fname_gas, fname_gen)
-
-fname_output = "data/OUTPUT"
 rerun = False
 if rerun:
     ramp, ramp_v, unittest_gas, unittest  = unit.get_matlab_output(fname_steam, fname_gas, order, t_sim, fname_output)
 else:
     ramp, ramp_v, unittest_gas, unittest  = unit.read_matlab_output(fname_output)
 
-# Common Accessor Functions
-def shifted_compA(k, j, data):
-    return data[:, j - k]
+# Get Matlab Output and Generator Information Dataframes
+output_gen_info_org, output_gov_gasInfo_org, gen_data = readgen.get_gen_params(fname_steam, fname_gas, fname_gen)
 
-def shifted_compB(k, j, data, limit_start, time_fit_len):
-    datalen = time_fit_len - limit_start 
-    result = np.empty(limit_start + datalen)
-
-    result[:limit_start] = 0
-    result[limit_start:] = data[:datalen, j - k -1]
-
-    return result
 
 def power_series_matrix(order):
+    '''
+    Description:
+        Pre-Process polynomial matrix structure based on order
+    '''
     J = np.zeros((order+2, order+2))
     K = 0
     for k in range(order+2):
@@ -59,46 +49,25 @@ def power_series_matrix(order):
 
     return FACT_MAT, K
 
-FACT_MAT, K = power_series_matrix(order)
-
-#@jit(nopython=False, forceobj=True)
-def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info_org, output_gov_gasInfo_org):
+def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, gen_data_active, gov_gasInfo, numSteam):
    
-    # Generator information
-    event_gen = pd.DataFrame({
-        'BusNum' : [7098, 7099],
-        'GenID' : [1, 1]
-    })
+    FACT_MAT, K = power_series_matrix(order)
 
-    # NOTE copy not needed - it is slow 
-    output_gen_info    = output_gen_info_org
-    output_gov_gasInfo = output_gov_gasInfo_org
 
-    output_gen_info['TSVmax']     = 0.87
-    output_gov_gasInfo['TSLdref'] = 0.835
-    gen_data_active, gov_gasInfo  = datagen.DataGenerate(
-        gen_data, 
-        output_gen_info, 
-        output_gov_gasInfo, 
-        event_gen
-    )
+    gen_data_active_index = gen_data_active.index
 
     numGen  = gen_data_active.shape[0]
-    P_event = 2558/sum(gen_data_active['GenMVABase'])
+    P_event = 2558 / sum(gen_data_active['GenMVABase'])
     Hsys    = sum(gen_data_active['TSH']*100)/sum(gen_data_active['GenMVABase'])
 
-    ## Coefficient for Polynomial Fitting
-    # Lambda matrix for integral of ramp polynomials
-
-    # Initialize variables
-    coeffi = 1 / (np.arange(1, order + 2))  # Coefficients for lambda matrix
-    lamda  = np.diagflat(1-coeffi)
+    # Coefficient for Polynomial Fitting
+    coeffi = 1/np.arange(1, order + 2)
 
     # Proportional coefficient for governor output (based on machine size)
     alpha = gen_data_active['GenMVABase'] / sum(gen_data_active['GenMVABase'])
 
     # Initialization
-    mask_index_nolimit = pd.Series(data=np.ones(numGen, dtype=bool), index=gen_data_active.index)
+    mask_index_nolimit = pd.Series(data=np.ones(numGen, dtype=bool), index=gen_data_active_index)
     index_limit = []
     index_limit_valve = []
     index_limit_load = []
@@ -114,28 +83,28 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
     default_index = np.arange(time_fit_len)
 
     # Filter the columns in output_unittest['ramp_v'] that match the 'Index' values from gen_data_active
-    ramp = ramp[:,gen_data_active.index]
-    ramp_v = ramp_v[:,gen_data_active.index]
+    ramp   = ramp[:,gen_data_active_index]
+    ramp_v = ramp_v[:,gen_data_active_index]
 
-    rampResponse_fit = ramp[0:time_fit_len, :]
+    rampResponse_fit   = ramp[0:time_fit_len, :]
     v_rampResponse_fit = ramp_v[0:time_fit_len, :]
 
     # Polynomial fitting for each generator
     # Fit polynomials & reverse coefficient order for later evaluation
-    tempa = np.polyfit(time_fit,rampResponse_fit, order).T[:,::-1] # Flipping the polynomial coefficients
+    tempa = np.polyfit(time_fit,  rampResponse_fit  , order).T[:,::-1] # Flipping the polynomial coefficients
     tempb = np.polyfit(time_fit,  v_rampResponse_fit, order).T[:,::-1]
-    p_gov_total = pd.DataFrame(tempa, index=gen_data_active.index)
-    p_valve_total = pd.DataFrame(tempb, index=gen_data_active.index)
+    p_gov_total = pd.DataFrame(tempa, index=gen_data_active_index)
+    p_valve_total = pd.DataFrame(tempb, index=gen_data_active_index)
 
     # Frequency Nadir Calculation - No Limit Violation
     t_fit_step = 1
     Pm_limit = np.zeros(time_fit_len)
 
     # Initialize arrays with zeros
-    limitCheck_old = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active.index)
-    valve_limitCheck_old = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active.index)
-    load_limitCheck_old = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active.index)
-    limitCheck_old_valveAfterLoad = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active.index)
+    limitCheck_old        = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active_index)
+    valve_limitCheck_old  = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active_index)
+    load_limitCheck_old   = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active_index)
+    limitCheck_old_valveAfterLoad = pd.Series(data=np.zeros(numGen, dtype=bool), index=gen_data_active_index)
 
     # Filter time_fit based on the condition (time10 <= t_fit)
     limit_start = 1
@@ -154,11 +123,11 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
     # NOTE creating pre-multiplied variable
     tpow_lam = t_powers*(1-coeffi)
 
-    zeros_column = pd.DataFrame(np.zeros((p_valve_total.shape[0], 1)), index=gen_data_active.index)
+    zeros_column = pd.DataFrame(np.zeros((p_valve_total.shape[0], 1)), index=gen_data_active_index)
 
     # Insert zero-filled columns at the beginning and end
     ramp_p_integ = pd.concat([zeros_column, p_valve_total], axis=1)
-    ramp_p = pd.concat([p_valve_total, zeros_column], axis=1)
+    ramp_p       = pd.concat([p_valve_total, zeros_column], axis=1)
 
     ramp_p_integ.columns = range(ramp_p_integ.shape[1])
     ramp_p.columns = range(ramp_p.shape[1]) 
@@ -172,10 +141,9 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
 
     const_Lref = gov_gasInfo['TSLdref'] / gov_gasInfo['TSKturb'] + gov_gasInfo['TSWfnl']
     const_v_0 =  gov_gasInfo['GenMW'] / gov_gasInfo['GenMVABase'] / gov_gasInfo['TSKturb'] + gov_gasInfo['TSWfnl']
-    inner_limit = 1 - const_v_0
     temp = (const_Lref - const_v_0) * gov_gasInfo['TSKpload']
 
-    numSteam=len(output_gen_info[output_gen_info['Type'] == 'steam'])
+    
 
     z_coeffi = np.zeros(order+2)
     z_coeffi[1:] = coeffi
@@ -185,22 +153,25 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
     temp_matrix2 = t_powers_1   * coeffi @ p_valve_total.T
     temp_matrix3 = t_powers @ p_valve_total.T
 
-    # Pre-define this function
-    factorFunc = lambda k, j, t_limit:  t_limit ** k * factorial(j - 1) / (factorial(k) * factorial(j - 1 - k))
-
+   
     # Pre-Process Governor Mask
     is_ggov1 = gen_data_active['TSGenGovernorName'] == 'GGOV1'
+
+
             
     while True:
         
-        # Frequency nadir calculation
+        ''' Frequency nadir calculation'''
+
         while True:
             
-            p_gov_part = p_gov_total.loc[mask_index_nolimit]
-            p_valve_part = p_valve_total.loc[mask_index_nolimit]
-                    
+            # NOTE this was not referenced #p_valve_part = p_valve_total.loc[mask_index_nolimit]
+            p_gov_part   = p_gov_total.loc[mask_index_nolimit]
+            
+
             # Multiply each row of `p_gov_part_filtered` by the corresponding element in `alpha_filtered`
             p_gov_sys = (p_gov_part.T * alpha[mask_index_nolimit]).T.sum()
+            
 
             # Find Frequency Nadir Time by Minimizing Error
             if not index_limit:
@@ -210,10 +181,11 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
 
             t_n_star = time_fit[np.argmin(error_save)]
 
-
             if t_fit > t_n_star:
                 break
 
+            
+            # NOTE NOT CALLED
             # NOTE this does not get executed with default settings so I am not modifying for now
             else:
                 t_fit += t_fit_step
@@ -242,11 +214,11 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
                     p_valve_total[i] = np.polyfit(time_fit,  v_rampResponse_fit[:, i], order)[::-1] # Flipping the polynomial coefficients
                 
                 # Convert the lists to numpy arrays (optional)
-                p_gov_total = pd.DataFrame(p_gov_total, index=gen_data_active.index)
-                p_valve_total = pd.DataFrame(p_valve_total, index=gen_data_active.index)
+                p_gov_total   = pd.DataFrame(p_gov_total  , index=gen_data_active_index)
+                p_valve_total = pd.DataFrame(p_valve_total, index=gen_data_active_index)
                 
                 # NOTE make these *empty* sets not zero.
-                zeros_column = pd.DataFrame(np.zeros((p_valve_total.shape[0], 1)), index=gen_data_active.index)
+                zeros_column = pd.DataFrame(np.zeros((p_valve_total.shape[0], 1)), index=gen_data_active_index)
                 
                 # Insert zero-filled columns at the beginning and end
                 ramp_p_integ = pd.concat([zeros_column, p_valve_total], axis=1)
@@ -261,25 +233,19 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
                 temp_matrix1=ramp_p_integ @ diagonal_matrix
                 temp_matrix2=t_powers_1 @ np.diag(coeffi) @ p_valve_total.T
                 temp_matrix3=t_powers @ p_valve_total.T
+   
+
+        ''' Coefficients '''
 
         # Valve coefficient approximation   
         v_coeffifient_total = -P_event / (2 * Hsys) * (temp_matrix1 / t_n_star - ramp_p)
-        v_cal = -P_event / (2 * Hsys) * (1 / t_n_star * (temp_matrix2) - temp_matrix3)
+        v_cal               = -P_event / (2 * Hsys) * (1 / t_n_star * (temp_matrix2) - temp_matrix3)
 
         # Load limit response at no limit governors
-        nolimit_index_gas = (
-            gen_data_active.index[is_ggov1 & mask_index_nolimit]
-        ).tolist() 
-        
-        v_coefficient_limit = v_coeffifient_total.loc[nolimit_index_gas].to_numpy()
-        
-        # 'Empty' is much more effective
+        nolimit_index_gas   = gen_data_active_index[is_ggov1 & mask_index_nolimit]
+        vcoeff = v_coeffifient_total.loc[nolimit_index_gas].to_numpy()
         loadlimiter_results = np.empty((time_fit_len, len(nolimit_index_gas)))
         
-        '''
-        3 Dimensional Array
-        '''
-
         slice_gas_all = unittest_gas[:time_fit_len, :,:]
         for idx, i in enumerate(nolimit_index_gas):
 
@@ -287,26 +253,27 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
             slice_gas = slice_gas_all[:,:,i - numSteam]
             
             # Perform matrix multiplication and add temp[i]
-            loadlimiter_results[:, idx] = slice_gas @ v_coefficient_limit[idx] + temp[i] 
+            loadlimiter_results[:, idx] = slice_gas @ vcoeff[idx] + temp[i] 
     
         # NOTE This array/df is commented out in the above forloop, so it can be initiated here
         loadlimiter_output_initial = pd.DataFrame(loadlimiter_results, columns=nolimit_index_gas)
         
         # Initialize the limit check DataFrames with boolean values for faster operations  
-        valve_limitCheck = pd.Series(index=gen_data_active.index, dtype=bool)
-        load_limitCheck = pd.Series(index=gen_data_active.index, dtype=bool)
+        valve_limitCheck = pd.Series(index=gen_data_active_index, dtype=bool)
+        load_limitCheck = pd.Series(index=gen_data_active_index, dtype=bool)
         valve_limitCheck[:] = False
-        load_limitCheck[:] = False
+        load_limitCheck[:]  = False
 
         # Create boolean masks for `index_nolimit` and `nolimit_index_gas` to apply conditions across all time steps
-        mask_nolimit_index_gas1 = pd.Series(gen_data_active.index.isin(nolimit_index_gas), index=gen_data_active.index)
+        mask_nolimit_index_gas1 = pd.Series(gen_data_active_index.isin(nolimit_index_gas), index=gen_data_active_index)
         
-        
-        column = mask_index_nolimit.index[mask_index_nolimit]
         
         # Creating an empty array with shape (len_time_fit, len_column)
-        AAA = np.repeat([lim_u[column].values], time_fit_len, axis=0)
-        test_lim_u = pd.DataFrame(AAA, columns=column)
+        column = mask_index_nolimit.index[mask_index_nolimit]
+        test_lim_u = pd.DataFrame(
+            np.repeat([lim_u[column].values], time_fit_len, axis=0),
+            columns=column
+        )
         
         mask_valve_limit = (v_cal.loc[:, mask_index_nolimit] >= test_lim_u)
         first_true_row = mask_valve_limit.idxmax()
@@ -322,7 +289,7 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
             min_index_valv=99999
             
         
-        ''' Load Limit Check - 3D Array Used Here'''
+        ''' Load Limit Check '''
 
         column = mask_nolimit_index_gas1.index[mask_nolimit_index_gas1]
         
@@ -335,11 +302,9 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
             min_time_load = non_zero_values_load.min()
             min_index_load = non_zero_values_load.idxmin()
         else:
-            min_time_load=time_fit_len-1
+            min_time_load = time_fit_len-1
             min_index_load=99999
                 
-            
-            
         if min_time_valv < min_time_load:
             valve_limitCheck.loc[mask_index_nolimit] = valve_limitCheck.loc[mask_index_nolimit] | mask_valve_limit.loc[min_time_valv]    
             k_iter=min_time_valv
@@ -354,44 +319,41 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
         
         
         limit_start = min(k_iter, time_fit_len)
-        t_limit = time_fit[limit_start]
+        t_limit     = time_fit[limit_start]
 
-        # Power Series - Pre-Proccess
-        #PS = t_limit**K * FACT_MAT
+        ''' INDECIES OF VIOLATIONS '''
 
-        # Update indices based on limit checks
-        index_limit_old = index_limit
-        index_limit_old_valve = index_limit_valve
-        index_limit_old_load = index_limit_load
         
-        # Convert to boolean (True where value is non-zero, False where value is zero)
-        index_limit_valve = valve_limitCheck_old.index[(valve_limitCheck_old) | (valve_limitCheck)].tolist()
-        index_limit_load = load_limitCheck_old.index[(load_limitCheck_old) | (load_limitCheck)].tolist()
+        index_limit_valve_old = index_limit_valve
+        index_limit_load_old  = index_limit_load
+        index_limit_old       = index_limit
 
-        index_limit_new_valve = np.setdiff1d(index_limit_valve, index_limit_old_valve).tolist()
-        index_limit_new_load = np.setdiff1d(index_limit_load, index_limit_old_load).tolist()
+        limitCheck_old       |= valve_limitCheck | load_limitCheck
+        valve_limitCheck_old |= valve_limitCheck 
+        load_limitCheck_old  |= load_limitCheck
+        mask_index_nolimit    = ~limitCheck_old
+
+        index_limit_valve = valve_limitCheck_old.index[valve_limitCheck_old]
+        index_limit_load  = load_limitCheck_old.index[load_limitCheck_old]
+        index_limit       = limitCheck_old.index[limitCheck_old].tolist()
+
+        index_limit_new_valve = np.setdiff1d(index_limit_valve, index_limit_valve_old)
+        index_limit_new_load  = np.setdiff1d(index_limit_load, index_limit_load_old)
+        index_limit_new       = np.setdiff1d(index_limit, index_limit_old)
         
-        mask_index_nolimit = (~limitCheck_old) & (~valve_limitCheck) & (~load_limitCheck)
-
-        index_limit = limitCheck_old.index[(limitCheck_old) | (valve_limitCheck) | (load_limitCheck)].tolist()
-
-        index_limit_new = np.setdiff1d(index_limit, index_limit_old).tolist()
         
-        limitCheck_old       = (limitCheck_old)       | (valve_limitCheck) | (load_limitCheck)
-        valve_limitCheck_old = (valve_limitCheck_old) | (valve_limitCheck) 
-        load_limitCheck_old  = (load_limitCheck_old)  | (load_limitCheck) 
         
 
         if not len(index_limit_new) or t_limit > t_n_star:
             break
 
-        '''Load Limit Violation'''
+        ''' Handle Violations '''
+
         if status == LOAD_LIMIT_VIOLATION:
 
             # POWER SERIES MATRIX
-            PS = t_limit**K * FACT_MAT
-
-            v_coefficient_limit      = v_coeffifient_total.loc[index_limit_new_load,:].to_numpy()
+            PS     = t_limit**K * FACT_MAT
+            vcoeff = v_coeffifient_total.loc[index_limit_new_load,:].to_numpy()
             
             LL_OUTPUT   = np.empty((default_index.shape[0],len(index_limit_new_load)))
             LL_SV       = np.zeros((default_index.shape[0],len(index_limit_new_load)))
@@ -409,8 +371,8 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
                 DATA  = unittest_gas[:time_fit_len, :, i - numSteam]
 
                 LL_SV_SAVE        = DATA[:-SHFT]@PS
-                LL_OUTPUT[:, pos] = DATA@v_coefficient_limit[pos]
-                LL_SV[SHFT:, pos] = LL_SV_SAVE@v_coefficient_limit[pos]
+                LL_OUTPUT[:, pos] = DATA@vcoeff[pos]
+                LL_SV[SHFT:, pos] = LL_SV_SAVE@vcoeff[pos]
                 
             
                 # Polynomial fitting for load limiter
@@ -439,9 +401,6 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
             # Creating an empty array with shape
             v_cal_load = first_loadlimit + second_loadlimit + temp[index_limit_new_load].values
 
-            # Calculate limited Pm response considering load limiter
-            Pm_limit_new1 = np.empty((time_fit_len, len(index_limit_new_load)))
-            
             valve_coeffifient_limit = v_coeffifient_total.loc[index_limit_new_load, :]
 
             # NOTE we can do this outside the loop :)
@@ -457,8 +416,8 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
                 vecValve = valve_coeffifient_limit.loc[i, :]
                 vecLoad  = load_coeffifient_limit[idx, :]
          
-                Pm_limit_new1[:    , idx]  = alpha[i] * DATA@vecValve
-                Pm_limit_new1[SHFT:, idx] -= alpha[i] * DATA[:-SHFT]@PS@(vecValve-vecLoad)
+                Pm_limit         += alpha[i] * DATA@vecValve
+                Pm_limit[SHFT:]  -= alpha[i] * DATA[:-SHFT]@PS@(vecValve-vecLoad)
 
             
             # NOTE this was not doing anything so I removed
@@ -470,18 +429,21 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
 
             if len(non_zero_values_valv)>0:
                 status2 = 1
-                k_iter = non_zero_values_valv.min()
+                k_iter  = non_zero_values_valv.min()
                 # NOTE not in use? #min_index_valv = np.argmin(non_zero_values_valv)#.idxmin()
                 
             else:
                 status2 = 0
-                k_iter=time_fit_len-1
+                k_iter  = time_fit_len-1
                 #min_index_valv=99999
             
             # Calculate additional limited Pm response considering valve limiter after load limiter
             if status2 == 1:
+
                 limit_start_valveAfterLoad = min(k_iter, time_fit_len)
-                t_limit_valveAfterLoad = time_fit[limit_start_valveAfterLoad]
+                t_limit_valveAfterLoad     = time_fit[limit_start_valveAfterLoad]
+
+                PS = t_limit_valveAfterLoad**K * FACT_MAT
             
                 # Update indices for limits
                 index_limit_old_valveAfterLoad  = index_limit_valveAfterLoad
@@ -493,38 +455,22 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
                 load_coeffifient_valveAfterLoad = load_coeffifient_limit[temp_index, :]
             
                 v_limit_value = lim_u[index_limit_new_valveAfterLoad]
-                Pm_limit_new2 = np.empty((time_fit_len, len(index_limit_new_valveAfterLoad)))
-
-                factorFuncB = lambda k, j, t_limit: t_limit**k * factorial(j) / (factorial(k) * factorial(j - k))
 
                 for i, idx in enumerate(index_limit_new_valveAfterLoad):
 
                     SHFT = 0 if limit_start_valveAfterLoad == 1 else limit_start_valveAfterLoad 
                     DATA_SHIFTED  = unittest[:-SHFT, :, idx]
-                    GOV_SHFT_LOAD = np.zeros(time_fit_len - SHFT)
-                    
-                    for j in range(order + 2):
-                        for k in range(j):
 
-                            scalar         = load_coeffifient_valveAfterLoad[i, j] * factorFuncB(k, j, t_limit_valveAfterLoad)
-                            GOV_SHFT_LOAD += scalar * DATA_SHIFTED[:, j-k]
-                        
-                    GOV_SHFT_UNITSTEP       = v_limit_value[i] * DATA_SHIFTED[:, 0]
-                    Pm_limit_new2[SHFT:, i] = alpha[idx] * (GOV_SHFT_UNITSTEP - GOV_SHFT_LOAD)
+                    GOV_SHFT_LOAD = DATA_SHIFTED@PS@load_coeffifient_valveAfterLoad[i,:]
+                     
+                    GOV_SHFT_UNITSTEP = v_limit_value[i] * DATA_SHIFTED[:, 0]
+                    Pm_limit[SHFT:]   += alpha[idx] * (GOV_SHFT_UNITSTEP - GOV_SHFT_LOAD)
             
-                # Combine results
-                Pm_limit_new = np.hstack((Pm_limit_new1, Pm_limit_new2))
-            
-            else:
-                Pm_limit_new = Pm_limit_new1
 
-        # Valve Limit Violation
         elif status == VALVE_LIMIT_VIOLATION:
 
-            v_coeffifient_limit = v_coeffifient_total.loc[index_limit_new_valve, :].to_numpy()
-        
-            Pm_limit_new = np.empty((time_fit_len, len(index_limit_new_valve)))
-            v_limit_value = lim_u[index_limit_new_valve]
+            vcoeff = v_coeffifient_total.loc[index_limit_new_valve, :].to_numpy()
+            v_limit_value       = lim_u[index_limit_new_valve]
 
             PS = t_limit**K * FACT_MAT
 
@@ -532,70 +478,54 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
 
                 
                 ''' 3 Dimensional Array '''
-                DATA_UNSHIFTED = unittest[:time_fit_len, :, i]
-                gov_output    = DATA_UNSHIFTED @ v_coeffifient_limit[idx]
-
+                DATA = unittest[:time_fit_len, :, i]
         
                 SHFT = 0 if limit_start == 1 else limit_start
 
-                GOV_SHFT_UNITSTEP = DATA_UNSHIFTED[:-SHFT, 0] * v_limit_value[i]
-                GOV_SHFT_VALVE    = DATA_UNSHIFTED[:-SHFT, :]@PS@v_coeffifient_limit[idx, :]
+                GOV_SHFT_UNITSTEP = DATA[:-SHFT, 0] * v_limit_value[i]
+                GOV_SHFT_VALVE    = DATA[:-SHFT, :]@PS@vcoeff[idx, :]
 
 
-                Pm_limit_new[:    , idx]  = alpha[i] * gov_output
-                Pm_limit_new[SHFT:, idx] += alpha[i] * (GOV_SHFT_UNITSTEP - GOV_SHFT_VALVE)
-
-        
-        else:
-            Pm_limit_new = 0 
-            
-        # Final summation across columns
-        Pm_limit += np.sum(Pm_limit_new, axis=1)
+                Pm_limit        += alpha[i] * (DATA @ vcoeff[idx])
+                Pm_limit[SHFT:] += alpha[i] * (GOV_SHFT_UNITSTEP - GOV_SHFT_VALVE)
 
 
     ''' END ROUTINE'''
 
     # Initialize parameters and variables
     test_f0 = 1
-    test_time_plot = []
-    test_f = []
-    test_Pm = []
-    test_gov = []
-    test_test_gov = np.empty((time_fit_len, mask_index_nolimit.sum()))
+    
+    test_gov = np.empty((time_fit_len, mask_index_nolimit.sum()))
 
     # Calculate `test_test_gov` using `v_coeffifient_limit`
-    v_coeffifient_limit = v_coeffifient_total.loc[mask_index_nolimit, :].to_numpy()
+    vcoeff = v_coeffifient_total.loc[mask_index_nolimit, :].to_numpy()
 
     for i, idx in enumerate(mask_index_nolimit[mask_index_nolimit].index):
-        test_test_gov[:, i] = unittest[:time_fit_len, :, idx] @ v_coeffifient_limit[i]
+        test_gov[:, i] = unittest[:time_fit_len, :, idx] @ vcoeff[i]
 
-    k_iter = 0
-    for t in time_fit[time_fit < t_n_star + 1]:
+    test_times = time_fit[time_fit < t_n_star + 1]
+
+    test_f  = np.empty_like(test_times)
+    test_Pm = np.empty_like(test_times)
+
+    dt = test_times[1] - test_times[0]
+    for i, t in enumerate(test_times):
 
         # Calculate `test_gov` at each time step
-        test_gov = test_test_gov[k_iter, :]
-
-        # Calculate `test_Pm` based on presence of limits
-        if len(index_limit) == 0:
-            test_Pm_val = np.sum(alpha[mask_index_nolimit] * test_gov)
-        else:
-            test_Pm_val = np.sum(alpha[mask_index_nolimit] * test_gov) + Pm_limit[k_iter]
-        test_Pm.append(test_Pm_val)
+        # and       `test_Pm` based on presence of limits
+        test_Pm_val = np.sum(alpha[mask_index_nolimit] * test_gov[i, :])
+        if len(index_limit) != 0:
+            test_Pm_val += Pm_limit[i]
 
         # Frequency difference calculation
         test_f_diff = 1 / (2 * Hsys) * (test_Pm_val - P_event)
 
         # Calculate frequency at time t
-        if t == 0:
-            test_f_val = test_f0
-        else:
-            test_f_val = test_f[-1] + test_f_diff * (time_fit[k_iter] - time_fit[k_iter - 1])
-        test_f.append(test_f_val)
+        if t == 0: test_f[i] = test_f0
+        else:      test_f[i] = test_f[i-1] + test_f_diff * dt
+        
+        test_Pm[i] = test_Pm_val
 
-        # Store time plot values
-        test_time_plot.append(t)
-
-        k_iter += 1
 
     # Calculate f_nadir
     f_nadir = min(test_f) * 60
@@ -604,16 +534,22 @@ def run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info
     print("t_n_star:", t_n_star)
     print("f_nadir:", f_nadir)
 
+''' Parameters '''
+event_gen = pd.DataFrame({
+    'BusNum' : [7098, 7099],
+    'GenID'  : [1   , 1   ]
+})
 
-# Start Timer
+output_gen_info_org['TSVmax']     = 0.87
+output_gov_gasInfo_org['TSLdref'] = 0.835
+numSteam = len(output_gen_info_org[output_gen_info_org['Type'] == 'steam'])
+gen_data_active, gov_gasInfo  = datagen.DataGenerate(gen_data, output_gen_info_org, output_gov_gasInfo_org, event_gen)
+
+''' Run and Time Program'''
+
 start_time = time.time()
+run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, gen_data_active, gov_gasInfo, numSteam)
+end_time   = time.time()
 
-# Run
-#print(FACT_MAT)
-run_test(order, t_sim, ramp, ramp_v, unittest_gas, unittest, output_gen_info_org, output_gov_gasInfo_org)
-
-end_time = time.time()
-
-# Print the elapsed time
 print("Execution time:", end_time - start_time, "seconds")
     
